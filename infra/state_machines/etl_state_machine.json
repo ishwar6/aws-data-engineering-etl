@@ -1,0 +1,113 @@
+{
+  "Comment": "ETL pipeline orchestrating Glue, Fargate, and Lambda tasks",
+  "StartAt": "RunGlueJob",
+  "States": {
+    "RunGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "process-events",
+        "Arguments": {
+          "--RAW_BUCKET.$": "$.bucket",
+          "--RAW_KEY.$": "$.key",
+          "--PROCESSED_BUCKET": "processed-bucket",
+          "--ERROR_BUCKET": "error-bucket",
+          "--CATALOG_DB": "analytics",
+          "--CATALOG_TABLE": "events"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Failure"
+        }
+      ],
+      "Next": "FargateEnrichment"
+    },
+    "FargateEnrichment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "LaunchType": "FARGATE",
+        "Cluster": "etl-cluster",
+        "TaskDefinition": "enrichment-task",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": ["subnet-xxxxxx"],
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "enrichment",
+              "Environment": [
+                {"Name": "SOURCE_BUCKET", "Value": "processed-bucket"},
+                {"Name": "SOURCE_KEY.$", "Value": "$.processed_key"},
+                {"Name": "TARGET_BUCKET", "Value": "processed-bucket"},
+                {"Name": "TARGET_KEY.$", "Value": "$.enriched_key"}
+              ]
+            }
+          ]
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Failure"
+        }
+      ],
+      "Next": "PublishToStream"
+    },
+    "PublishToStream": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "publisher-lambda",
+        "Payload": {
+          "records.$": "$.records"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Failure"
+        }
+      ],
+      "Next": "Success"
+    },
+    "Failure": {
+      "Type": "Fail"
+    },
+    "Success": {
+      "Type": "Succeed"
+    }
+  }
+}
